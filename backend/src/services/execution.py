@@ -7,6 +7,7 @@ from src.domain.analysis import analyze
 from src.domain.spec import SPEC
 from src.models.jobs import Delivery, Run, Schedule
 from src.models.source import Dataset
+from src.services import transfers
 from src.services.audit import record
 from src.utils.exports import write_report
 from src.utils.time import now
@@ -58,14 +59,22 @@ def claim():
         job.attempt += 1
         job.lease_until = stamp + timedelta(minutes=3)
         records = db.get(Dataset, job.dataset_id).rows
-        return job.id, job.attempt, records, job.params
+        # 在闸门内取锁定快照，与确认互斥，保证规划读到的占用集是完整的。
+        with transfers.guard(db) as acquired:
+            if not acquired:
+                job.attempt -= 1
+                job.status = Status.QUEUED
+                job.lease_until = None
+                return None
+            locks = transfers.locks(db)
+        return job.id, job.attempt, records, job.params, locks
 
 
 def execute(lease):
-    job_id, attempt, rows, params = lease
+    job_id, attempt, rows, params, locks = lease
     result = export = failure = None
     try:
-        result = analyze(rows, params)
+        result = analyze(rows, params, locks)
         export = write_report(job_id, attempt, result)
     except ValueError as error:
         failure = str(error)[:500]
@@ -76,17 +85,39 @@ def execute(lease):
         job = db.get(Run, job_id, with_for_update=True)
         if job.attempt != attempt or job.status != Status.RUNNING:
             return
+        if not failure:
+            # 在闸门内取最新锁定复核：确认与重算互斥，writes 不会交错。
+            with transfers.guard(db) as acquired:
+                if acquired:
+                    dataset = db.get(Dataset, job.dataset_id)
+                    changed = transfers.refresh(db, dataset)
+                    for entry in changed:
+                        record(db, 'worker', f'transfer.{entry.state}', entry.id,
+                               reason=entry.reason, run_id=job.id)
+                    latest = transfers.locks(db)
+                    if latest != locks:
+                        # claim 之后到达的确认改变了占用集，用最新锁定重算并覆盖导出。
+                        try:
+                            result = analyze(rows, params, latest)
+                            export = write_report(job_id, attempt, result)
+                        except ValueError as error:
+                            failure = str(error)[:500]
+                        except Exception:
+                            log.exception('Analysis %s replan failed', job_id)
+                            failure = '计算失败，请检查字段口径后重试'
         job.lease_until = None
         job.finished_at = now()
         job.status = Status.FAILED if failure else Status.COMPLETE
         job.result = None if failure else result
-        job.export_file = export
+        job.export_file = None if failure else export
         job.error = failure
         record(db, 'worker', f'analysis.{job.status}', job.id, attempt=attempt, reason=failure)
         if job.schedule_id:
             plan = db.get(Schedule, job.schedule_id)
+            # 分发门槛仍以证书覆盖率为准；调拨缺口在班报内逐项说明，不拦截投递。
             ready = not failure and result.get('ready', True)
             detail = '已保存 CSV 到站内收件箱' if ready else (failure or result['headline'])
-            receipt = Delivery(run_id=job.id, recipient=plan.recipient, state='delivered' if ready else 'blocked', detail=detail[:500])
+            receipt = Delivery(run_id=job.id, recipient=plan.recipient,
+                               state='delivered' if ready else 'blocked', detail=detail[:500])
             db.add(receipt)
             record(db, 'worker', f'delivery.{receipt.state}', job.id, recipient=plan.recipient)

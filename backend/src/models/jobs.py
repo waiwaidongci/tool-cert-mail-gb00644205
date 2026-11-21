@@ -50,3 +50,25 @@ class Delivery(Base):
     state: Mapped[str] = mapped_column(String(20))
     detail: Mapped[str] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(default=now)
+
+
+class Transfer(Base):
+    """已确认的备用具调拨。确认即锁定，源数据变更后转为冲突并继续占用。"""
+
+    __tablename__ = 'transfers'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    station_id: Mapped[str] = mapped_column(String(40), index=True)
+    work_area: Mapped[str] = mapped_column(String(60))
+    demand_asset_id: Mapped[str] = mapped_column(String(40), index=True)
+    spare_id: Mapped[str] = mapped_column(String(40), index=True)
+    shift_start: Mapped[datetime] = mapped_column(index=True)
+    shift_end: Mapped[datetime]
+    dataset_id: Mapped[int | None] = mapped_column(ForeignKey('datasets.id'))
+    state: Mapped[str] = mapped_column(String(20), default='locked', index=True)
+    reason: Mapped[str | None] = mapped_column(String(300))
+    author: Mapped[str] = mapped_column(String(64))
+    confirmed_at: Mapped[datetime] = mapped_column(default=now)
+    released_at: Mapped[datetime | None] = mapped_column(index=True)
+    released_by: Mapped[str | None] = mapped_column(String(64))
+    release_note: Mapped[str | None] = mapped_column(String(300))

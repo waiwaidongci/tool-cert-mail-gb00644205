@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field
 from src.constants.enums import Review
 
@@ -28,3 +28,18 @@ class ScheduleRequest(RunRequest):
     recipient: str = Field(min_length=1, max_length=100)
     first_at: datetime
     repeat_daily: bool = False
+
+
+class TransferRequest(Request):
+    dataset_id: int = Field(gt=0)
+    station_id: str = Field(min_length=1, max_length=40)
+    work_area: str = Field(default='', max_length=60)
+    demand_asset_id: str = Field(min_length=1, max_length=40)
+    spare_id: str = Field(min_length=1, max_length=40)
+    shift_start: datetime
+    shift_end: datetime
+    report_day: date | None = None
+
+
+class ReleaseRequest(Request):
+    note: str = Field(min_length=1, max_length=300)

@@ -10,6 +10,7 @@ from src.models.identity import User
 from src.models.source import Dataset
 from src.schemas.requests import Upload
 from src.services.audit import record
+from src.services import transfers
 from src.services.datasets import save, template
 from src.services.validation import parse_rows
 from src.utils import views
@@ -50,5 +51,9 @@ def upload(body: Upload, db: Session = Depends(connection),
     item, created = save(db, body.name, body.filename, rows, actor.username)
     if created:
         record(db, actor.username, 'dataset.imported', item.id, rows=item.row_count)
+        changed = transfers.refresh(db, item)
+        for entry in changed:
+            record(db, 'system', f'transfer.{entry.state}', entry.id,
+                   reason=entry.reason, dataset_id=entry.dataset_id)
     db.commit()
     return {**views.dataset(item), 'created': created}
